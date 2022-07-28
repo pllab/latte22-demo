@@ -115,7 +115,6 @@
       (match args
              [(INPUT w _) (hash-set! symputs id (new-sym w))]
              [(REGISTER w _ _) (hash-set! symputs id (new-sym w))]
-             ;[(HOLE w _ _) (hash-set! symputs id (new-sym w))]
              [(MEMORY bw aw n)
               (begin (define-symbolic* mem (~> (bitvector aw) (bitvector bw)))
               (hash-set! symputs id (vector mem null)))]
@@ -143,21 +142,18 @@
                                   out
                                   (map new-sym (make-list steps w)))]
         [_ (void)])]))
-  ;(printf "hole-env ~a~n" hole-env)
 
   (define (unzip lst [acc '()])
     (if (or (empty? lst) (empty? (car lst)))
       (reverse acc)
       (unzip (map cdr lst) (cons (map car lst) acc))))
   (define unzipped-holes (unzip (vector->list hole-env)))
-  ;(printf "unzip ~a~n" unzipped-holes)
 
   (for ([i (range steps)])
        (vector-set! holemap i (list->vector (list-ref unzipped-holes i))))
 
   (for ([d (block-decls net)])
     (let ([id (first d)] [args (second d)])
-      ;(printf "~a ~a~n" id args)
       (store id
              (match args
                [(INPUT w _) 
@@ -306,16 +302,13 @@
       [(MUX sel a b)  (if (bvzero? (net-eval sel)) (net-eval a) (net-eval b))]
       [(WITH c t f)   (cond [(bvzero? (net-eval c)) (net-eval f)]
                             [else (net-eval t)])]
-      ;[(READ id addr)
-      ; (vector-ref-bv (load id) (net-eval addr))]
       [(READ id addr)
        (let* ([mem-uf (vector-ref (load id) 0)]
               [mem-alist (vector-ref (load id) 1)]
               [eval-addr (net-eval addr)]
               [read-data (assoc-bv eval-addr mem-alist)])
          (cond [read-data (cdr read-data)]
-               [else ;(printf "  READ-ASSOC: ~a not found~n" eval-addr)
-                     (apply mem-uf (list eval-addr))]))]
+               [else (apply mem-uf (list eval-addr))]))]
       [(list out op) 
        (let ([result 
               (match op
@@ -326,535 +319,20 @@
                               [eval-addr (net-eval addr)]
                               [eval-data (net-eval data)]
                               [assoc-data (assoc-bv eval-addr mem)])
-                          ;(printf "  WRITE-ASSOC~n  eval addr ~a~n" eval-addr)
-                          ;(printf "  eval data: ~a~n" eval-data)
-                          ;(printf "  assoc data: ~a~n" assoc-data)
                           (vector mem-uf
                             (cond [assoc-data
                                    (acons eval-addr eval-data (remove assoc-data mem))]
                                   [else (acons eval-addr eval-data mem)])))]
-                          ;(acons eval-addr eval-data mem))]
                        [else (load out)])]
-                ;[(WRITE addr data we) 
-                ; (cond [(not (bvzero? (net-eval we)))
-                ;        (vector-set!-bv (net-eval out) 
-                ;                        (net-eval addr) 
-                ;                        (net-eval data))
-                ;        (net-eval out)]
-                ;       [else (load out)])]
                 [_ (net-eval op)])])
          (cond [(hash-has-key? regmap out) => (hash-set! regmap out result)]
                [else => (store out result)]))]))
 
   ; run it!
   (for ([s (block-stmts program)])
-    ;(printf "net-eval: ~a~n" s)
     (net-eval s))
 
   (values env regmap))
-
-(define (simulate! 
-                #:sketch sketch
-                #:steps steps
-                #:inputs inputs)
-  ; env setup
-  (define-values (env regmap holemap) 
-                 (setup-env sketch 0 steps inputs))
-  (define ports-map (build-ports-map (block-decls sketch)))
-  (define (ports name) (hash-ref ports-map name))
-
-  (define pre-env (vector-copy env))
-  (define (pre i) (vector-ref pre-env i))
-  (print-env (block-decls sketch) env)
-
-  ; evaluate 1 step
-  (set!-values (env regmap) (interpret sketch
-                                       env 
-                                       regmap))
-  ; then the rest
-  (for ([i (cdr (range steps))])
-    (set!-values (env regmap) (interpret sketch
-                                         (update-env env (hash) regmap (hash)) 
-                                         regmap))
-    (print-env (block-decls sketch) env)
-    )
-  (set! env (update-env env (hash) regmap (hash)))
-  (print-env (block-decls sketch) env))
-
-
-(define (synth!-2 #:preconditions preconditions 
-                #:postconditions postconditions
-                #:sketch sketch
-                #:steps steps
-                #:reg-state reg-state
-                #:mem-state mem-state
-                #:inputs inputs)
-  ; env setup
-  (define-values (env regmap holemap) 
-                 (setup-env sketch 0 steps inputs))
-  (define ports-map (build-ports-map (block-decls sketch)))
-  (define (ports name) (hash-ref ports-map name))
-
-  ;; deep copy environment otherwise memory vectors will be mutated
-  (define (copy-env e)
-    (define new-env (vector-copy e))
-    (for ([entry e]
-          [index (in-naturals)])
-         (cond 
-           [(union? entry)
-            (vector-set! new-env
-                         index
-                         (union-contents entry))]
-           [(vector? entry)
-            (vector-set! new-env
-                         index
-                         (vector->immutable-vector (vector-copy entry)))]))
-    new-env)
-  (define pre-env (copy-env env))
-  (define (pre i) (vector-ref pre-env i))
-
-  ;; thoughts about faking a kind of temporal "eventually" operator? <>
-  ;; keep track of state vectors over all steps of symbolic execution,
-  ;; then tell solver that at _some point_ this state assertion holds...
-  ;; what does that look like?
-  ;;    (assume preconditions step-0)
-  ;;    (assert (or (postconditions step-1) (postconditions step-2) ...))
-
-  (print-env (block-decls sketch) env)
-
-  ;(for ([h holemap])
-  ;     (printf "* ~a~n" h))
-
-  ; evaluate 1 step
-  (set!-values (env regmap) (interpret sketch
-                                       env 
-                                       regmap))
-  (print-env (block-decls sketch) env)
-
-  (define step1-env (copy-env (update-env env (hash) regmap (hash))))
-  (define (step1 i) (vector-ref step1-env i))
-
-  ; then the rest
-  (for ([i (cdr (range steps))])
-    ;(let ([nenv (update-env env (hash) regmap (vector-ref holemap i))])
-      (set!-values (env regmap) (interpret sketch
-                                           (update-env env (hash) regmap (vector-ref holemap i));nenv 
-                                           regmap))
-      ;)
-    (print-env (block-decls sketch) env)
-    )
-  (set! env (update-env env (hash) regmap (hash)))
-
-  (print-env (block-decls sketch) env)
-  (print-holes (block-decls sketch) 
-               holemap
-               steps)
-  (define (post i) (vector-ref env i))
-
-  ;(printf "forall: ~a~n" 
-  ;     (append (map pre (map ports reg-state))
-  ;             (list (vector-ref (pre (ports "imem")) 0)
-  ;                   (vector-ref (pre (ports "dmem")) 0))
-  ;             (vector->list (pre (ports "rf")))
-  ;             (filter (lambda (x) x) (vector->list (vector-ref holemap 1)))
-  ;             ))
-
-
-  ;; split state postconditions experiment
-  (define (post-pc4 pre post ports) 
-    ;(assert
-      (equal? (post (ports "pc"))
-              (bvadd
-                (pre (ports "pc"))
-                (bv 4 32))))
-
-  (define (post-pcimm pre post ports)
-    (let* (
-           [ir (apply (vector-ref (pre (ports "imem")) 0)
-                      (list (bvlshr (pre (ports "pc")) (bv 2 32))))]
-           [imm (sign-extend (concat
-                  (bit 31 ir)
-                  (bit 7 ir)
-                  (extract 30 25 ir)
-                  (extract 11 8 ir)
-                  (bv 0 1))
-                  (bitvector 32))]
-           )
-      (begin 
-         ;(assert
-           (equal? (post (ports "pc"))
-                   (bvadd
-                     (pre (ports "pc"))
-                     imm)))))
-
-
-  ; solve
-  (define model
-    (synthesize
-     #:forall
-       (append (map pre (map ports reg-state))
-               (vector->list (pre (ports "rf")))
-               (list (vector-ref (pre (ports "imem")) 0)
-                     (vector-ref (pre (ports "dmem")) 0))
-               (filter (lambda (x) x) (vector->list (vector-ref holemap 1)))
-               )
-     #:guarantee 
-    ;(verify
-       (begin
-         ;(assume (equal? (vector-ref (vector-ref holemap 0) (ports "cont_mem_read_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 0) (ports "cont_reg_write_src_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 0) (ports "cont_reg_write_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 0) (ports "cont_imm_type_hole")) (bv 3 3)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 0) (ports "cont_mem_sign_ext_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 0) (ports "cont_branch_inv_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 0) (ports "cont_mem_write_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 0) (ports "cont_alu_op_hole")) (bv 4 4)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 0) (ports "cont_alu_pc_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 0) (ports "cont_alu_imm_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 0) (ports "cont_target_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 0) (ports "cont_mask_mode_hole")) (bv 0 2)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 0) (ports "cont_jump_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 0) (ports "cont_branch_hole")) (bv 1 1)))
-         ;;; ---
-         ;(assume (equal? (vector-ref (vector-ref holemap 1) (ports "cont_mem_read_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 1) (ports "cont_reg_write_src_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 1) (ports "cont_reg_write_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 1) (ports "cont_imm_type_hole")) (bv 7 3)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 1) (ports "cont_mem_sign_ext_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 1) (ports "cont_branch_inv_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 1) (ports "cont_mem_write_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 1) (ports "cont_alu_op_hole")) (bv #xf 4)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 1) (ports "cont_alu_pc_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 1) (ports "cont_alu_imm_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 1) (ports "cont_target_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 1) (ports "cont_mask_mode_hole")) (bv 0 2)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 1) (ports "cont_jump_hole")) (bv 0 1)))
-         ;(assume (equal? (vector-ref (vector-ref holemap 1) (ports "cont_branch_hole")) (bv 0 1)))
-         (apply preconditions (list pre ports))
-         (apply postconditions (list pre post ports))
-         (assert
-           ;(or 
-           (apply post-pc4 (list pre step1 ports)))
-           ;(apply post-pc4 (list pre post ports))))
-
-         ;(assume (bvzero? (pre (ports "ex_cont_branch"))))
-         ;(assume (bvzero? (pre (ports "ex_cont_jump"))))
-         ;(assume (bvzero? (pre (ports "ex_cont_reg_write"))))
-         ;(assume (bvzero? (post (ports "ex_cont_branch"))))
-         ;(assume (bvzero? (post (ports "ex_cont_jump"))))
-         ;(assume (bvzero? (post (ports "ex_cont_reg_write"))))
-         ;(assume (bvzero? (pre (ports "ex_cont_mem_read"))))
-         ;(assume (bvzero? (pre (ports "ex_cont_mem_write"))))
-         ;(assume (not (bvzero? (pre (ports "ex_cont_valid")))))
-         ;(assume (not (bvzero? (post (ports "ex_cont_valid")))))
-         ;(assert (not (bvzero? (apply (vector-ref (pre (ports "imem")) 0)
-         ;                                     (list (bvlshr (pre (ports "ex_pc")) (bv 2 32)))))))
-         ;(assert (not (bvzero? (apply (vector-ref (pre (ports "imem")) 0)
-         ;                             (list (bvlshr (pre (ports "pc")) (bv 2 32)))))))
-         ;(assert (not (bvzero? (apply (vector-ref (step1 (ports "imem")) 0)
-         ;                             (list (bvlshr (step1 (ports "pc")) (bv 2 32)))))))
-         ;(assert (not (bvzero? (apply (vector-ref (post (ports "imem")) 0)
-         ;                             (list (bvlshr (post (ports "pc")) (bv 2 32)))))))
-
-         ;; beq spec
-         ;(let* (
-         ;       [ir (apply (vector-ref (pre (ports "imem")) 0)
-         ;                  (list (bvlshr (pre (ports "pc")) (bv 2 32))))]
-         ;       [rs1 (extract 19 15 ir)]
-         ;       [rs2 (extract 24 20 ir)]
-         ;       [rs1-val 
-         ;            (if 
-         ;              (bvzero? rs1)
-         ;              (bv 0 32)
-         ;              (vector-ref-bv (pre (ports "rf")) rs1))] 
-         ;       [rs2-val
-         ;            (if 
-         ;              (bvzero? rs2)
-         ;              (bv 0 32)
-         ;              (vector-ref-bv (pre (ports "rf")) rs2))]
-         ;       [imm (sign-extend (concat
-         ;              (bit 31 ir)
-         ;              (bit 7 ir)
-         ;              (extract 30 25 ir)
-         ;              (extract 11 8 ir)
-         ;              (bv 0 1))
-         ;              (bitvector 32))]
-         ;       [br? (bveq rs1-val rs2-val)])
-         ;  ;; note: both of these work under verification wrt reference,
-         ;  ;;       but the second is slower
-         ;  (assert
-         ;    (equal? (if br?
-         ;              (post (ports "pc"))
-         ;              (step1 (ports "pc")))
-         ;            (bvadd
-         ;              (pre (ports "pc"))
-         ;              (if br? 
-         ;                imm
-         ;                (bv 4 32)))))
-         ;  ;(if (bveq rs1-val rs2-val)
-         ;  ;    ;; eventually pc <- pc+imm
-         ;  ;    (assert
-         ;  ;      (or 
-         ;  ;      (apply post-pcimm (list pre step1 ports))
-         ;  ;      (apply post-pcimm (list pre post ports))))
-         ;  ;    ;; else eventually pc <- pc+4
-         ;  ;    (assert
-         ;  ;      (or 
-         ;  ;      (apply post-pc4 (list pre step1 ports))
-         ;  ;      (apply post-pc4 (list pre post ports)))))
-         ;  )
-  
-         )
-  ))
-
-  (cond [(unsat? model) (printf "Unsynth!~n") #f]
-        [else (print-holes (block-decls sketch) 
-                           (evaluate holemap model)
-                           steps)
-              ;(let* ([pre-menv  (evaluate pre-env model)]
-              ;       [step1-menv (evaluate step1-env model)]
-              ;       [post-menv (evaluate env model)]
-              ;       [pre-ir (apply (vector-ref (vector-ref pre-menv (ports "imem")) 0)
-              ;                        (list (bvlshr (vector-ref pre-menv (ports "pc")) (bv 2 32))))]
-              ;       [step1-ir (apply (vector-ref (vector-ref step1-menv (ports "imem")) 0)
-              ;                        (list (bvlshr (vector-ref step1-menv (ports "pc")) (bv 2 32))))]
-              ;       [post-ir (apply (vector-ref (vector-ref post-menv (ports "imem")) 0)
-              ;                        (list (bvlshr (vector-ref post-menv (ports "pc")) (bv 2 32))))])
-              ;  (printf "pred op ~a(~a)~n" (extract 6 0 (apply (vector-ref (vector-ref pre-menv (ports "imem")) 0)
-              ;                                (list (bvlshr (vector-ref pre-menv (ports "ex_pc")) (bv 2 32)))))
-              ;                             (vector-ref pre-menv (ports "ex_pc")))
-              ;  (printf "pred branch: ~a~n" (vector-ref pre-menv (ports "ex_cont_branch")))
-              ;  (printf "pred jump ~a~n" (vector-ref pre-menv (ports "ex_cont_jump")))
-              ;  (printf "pred alu op ~a~n" (vector-ref pre-menv (ports "ex_cont_alu_op")))
-              ;  (printf "pred reg write ~a~n" (vector-ref pre-menv (ports "ex_cont_reg_write")))
-              ;  (printf "pred mem write ~a~n" (vector-ref pre-menv (ports "ex_cont_mem_write")))
-              ;  (printf "pred mem read ~a~n" (vector-ref pre-menv (ports "ex_cont_mem_read")))
-              ;  (printf "pred valid ~a~n-------~n" (vector-ref pre-menv (ports "ex_cont_valid")))
-              ;  (printf "target inst op: ~a (~a)~n" (extract 6 0 pre-ir) (vector-ref pre-menv (ports "pc")))
-              ;  (printf "step1 op: ~a (~a)~n" (extract 6 0 step1-ir) (vector-ref step1-menv (ports "pc")))
-              ;  (printf "step1 branch: ~a~n" (vector-ref step1-menv (ports "ex_cont_branch")))
-              ;  (printf "step1 jump ~a~n" (vector-ref step1-menv (ports "ex_cont_jump")))
-              ;  (printf "step1 alu op ~a~n" (vector-ref step1-menv (ports "ex_cont_alu_op")))
-              ;  (printf "step1 reg write ~a~n" (vector-ref step1-menv (ports "ex_cont_reg_write")))
-              ;  (printf "step1 mem write ~a~n" (vector-ref step1-menv (ports "ex_cont_mem_write")))
-              ;  (printf "step1 mem read ~a~n" (vector-ref step1-menv (ports "ex_cont_mem_read")))
-              ;  (printf "step1 valid ~a~n-------~n" (vector-ref step1-menv (ports "ex_cont_valid")))
-              ;  (printf "succ op: ~a (~a)~n" (extract 6 0 post-ir) (vector-ref post-menv (ports "pc")))
-              ;  (printf "succ branch: ~a~n" (vector-ref post-menv (ports "ex_cont_branch")))
-              ;  (printf "succ jump ~a~n" (vector-ref post-menv (ports "ex_cont_jump")))
-              ;  (printf "succ alu op ~a~n" (vector-ref post-menv (ports "ex_cont_alu_op")))
-              ;  (printf "succ reg write ~a~n" (vector-ref post-menv (ports "ex_cont_reg_write")))
-              ;  (printf "succ mem write ~a~n" (vector-ref post-menv (ports "ex_cont_mem_write")))
-              ;  (printf "succ mem read ~a~n" (vector-ref post-menv (ports "ex_cont_mem_read")))
-              ;  (printf "succ valid ~a~n" (vector-ref post-menv (ports "ex_cont_valid")))
-              ;  )
-              (get-holes (block-decls sketch) 
-                           (evaluate holemap model)
-                           steps)]))
-
-(define (verify!-3 #:preconditions preconditions 
-                #:postconditions postconditions
-                #:sketch sketch
-                #:steps steps
-                #:reg-state reg-state
-                #:mem-state mem-state
-                #:inputs inputs)
-  ; env setup
-  (define-values (env regmap holemap) 
-                 (setup-env sketch 0 steps inputs))
-  (define ports-map (build-ports-map (block-decls sketch)))
-  (define (ports name) (hash-ref ports-map name))
-
-  ;; deep copy environment otherwise memory vectors will be mutated
-  (define (copy-env e)
-    (define new-env (vector-copy e))
-    (for ([entry e]
-          [index (in-naturals)])
-         (cond 
-           [(union? entry)
-            (vector-set! new-env
-                         index
-                         (union-contents entry))]
-           [(vector? entry)
-            (vector-set! new-env
-                         index
-                         (vector->immutable-vector (vector-copy entry)))]))
-    new-env)
-  (define pre-env (copy-env env))
-  (define (pre i) (vector-ref pre-env i))
-
-  (define step-envs (make-vector steps #f))
-
-  ;(print-env (block-decls sketch) env)
-
-  ;(for ([h holemap])
-  ;     (printf "* ~a~n" h))
-
-  ; evaluate 1 step
-  (set!-values (env regmap) (interpret sketch
-                                       env 
-                                       regmap))
-  ;(print-env (block-decls sketch) env)
-
-  (vector-set! step-envs 0 (vector-copy (update-env env (hash) regmap (hash))))
-  ;(define if/d-env (vector-copy (update-env env (hash) regmap (hash))))
-  ;(define (if/d i) (vector-ref if/d-env i))
-
-  ; then the rest
-  (for ([i (cdr (range steps))])
-    (let ([nenv (update-env env (hash) regmap (vector-ref holemap i))])
-      (set!-values (env regmap) (interpret sketch
-                                           nenv 
-                                           regmap))
-      (vector-set! step-envs i (vector-copy (update-env env (hash) regmap (hash)))))
-      ;)
-    ;(print-env (block-decls sketch) env)
-    )
-  (set! env (update-env env (hash) regmap (hash)))
-
-  ;(print-env (block-decls sketch) env)
-  ;(print-holes (block-decls sketch) 
-  ;             holemap
-  ;             steps)
-  (define (post i) (vector-ref env i))
-
-  ;(printf "forall: ~a~n" 
-  ;     (append (map pre (map ports reg-state))
-  ;             (list (vector-ref (pre (ports "imem")) 0)
-  ;                   (vector-ref (pre (ports "dmem")) 0)
-  ;                   (vector-ref (pre (ports "rf")) 0))
-  ;             ))
-  ;(define (pc-state i)
-  ;  (vector-ref (vector-ref step-envs (apply choose* (range steps))) i))
-
-  ; solve
-  (define model
-    (synthesize
-     #:forall
-       (append (map pre (map ports reg-state))
-               (list (vector-ref (pre (ports "imem")) 0)
-                     (vector-ref (pre (ports "dmem")) 0)
-                     (vector-ref (pre (ports "rf")) 0))
-               )
-     #:guarantee 
-       (begin
-         (apply preconditions (list pre ports))
-         (apply postconditions (list pre step-envs ports))
-         )
-  ))
-
-  (cond [(unsat? model) (printf "Unsynth!~n") #f]
-        [else (print-holes (block-decls sketch) 
-                           (evaluate holemap model)
-                           steps)
-              (get-holes (block-decls sketch) 
-                           (evaluate holemap model)
-                           steps)]))
-
-
-(define (synth!-3 #:preconditions preconditions 
-                #:postconditions postconditions
-                #:sketch sketch
-                #:steps steps
-                #:reg-state reg-state
-                #:mem-state mem-state
-                #:inputs inputs)
-  ; env setup
-  (define-values (env regmap holemap) 
-                 (setup-env sketch 0 steps inputs))
-  (define ports-map (build-ports-map (block-decls sketch)))
-  (define (ports name) (hash-ref ports-map name))
-
-  (vector-set! env (ports "trap") (bv 1 1))
-
-  ;; deep copy environment otherwise memory vectors will be mutated
-  (define pre-env (vector-copy env))
-  (for ([entry pre-env]
-        [index (in-naturals)])
-       (cond [(vector? entry) 
-              (vector-set! pre-env
-                           index
-                           (vector->immutable-vector (vector-copy entry)))]))
-  (define (pre i) (vector-ref pre-env i))
-
-  ;(print-env (block-decls sketch) env)
-
-  ;(for ([h holemap])
-  ;     (printf "* ~a~n" h))
-
-  ; evaluate 1 step
-  (set!-values (env regmap) (interpret sketch
-                                       env 
-                                       regmap))
-  ;(print-env (block-decls sketch) env)
-
-  ;(define if/d-env (vector-copy (update-env env (hash) regmap (hash))))
-  ;(define (if/d i) (vector-ref if/d-env i))
-
-  ; then the rest
-  (for ([i (cdr (range steps))])
-    (let ([nenv (update-env env (hash) regmap (vector-ref holemap i))])
-      (cond [(= i 1) =>
-                     (vector-set! nenv (ports "trap") (bv 0 1))]
-            [else =>
-                     (vector-set! nenv (ports "trap") (bv 1 1))])
-      (set!-values (env regmap) (interpret sketch
-                                           nenv 
-                                           regmap)))
-      ;)
-    ;(print-env (block-decls sketch) env)
-    )
-  (set! env (update-env env (hash) regmap (hash)))
-
-  ;(print-env (block-decls sketch) env)
-  ;(print-holes (block-decls sketch) 
-  ;             holemap
-  ;             steps)
-  (define (post i) (vector-ref env i))
-
-  ;(printf "forall: ~a~n" 
-  ;     (append (map pre (map ports reg-state))
-  ;             (list (vector-ref (pre (ports "imem")) 0)
-  ;                   (vector-ref (pre (ports "dmem")) 0)
-  ;                   (vector-ref (pre (ports "rf")) 0))
-  ;             ))
-
-  ; solve
-  (define model
-    (synthesize
-     #:forall
-       (append (map pre (map ports reg-state))
-               ;(vector->list (pre (ports "rf")))
-               (list (vector-ref (pre (ports "imem")) 0)
-                     (vector-ref (pre (ports "dmem")) 0)
-                     (vector-ref (pre (ports "rf")) 0))
-               (vector->list (vector-ref holemap 0))
-               (vector->list (vector-ref holemap 2))
-               )
-     #:guarantee 
-       (begin
-         (apply preconditions (list pre ports))
-
-         (assume (equal? (vector-ref (vector-ref holemap 0) (ports "cont_jump_hole")) (bv 0 1)))
-         (assume (equal? (vector-ref (vector-ref holemap 0) (ports "cont_branch_hole")) (bv 0 1)))
-
-         (assume (equal? (vector-ref (vector-ref holemap 2) (ports "cont_jump_hole")) (bv 0 1)))
-         (assume (equal? (vector-ref (vector-ref holemap 2) (ports "cont_branch_hole")) (bv 0 1)))
-
-         (assume (equal? (vector-ref (vector-ref holemap 0) (ports "cont_mem_write_hole")) (bv 0 1)))
-         (assume (equal? (vector-ref (vector-ref holemap 2) (ports "cont_mem_write_hole")) (bv 0 1)))
-
-         (apply postconditions (list pre post ports))
-         )
-  ))
-
-  (cond [(unsat? model) (printf "Unsynth!~n") #f]
-        [else (print-holes (block-decls sketch) 
-                           (evaluate holemap model)
-                           steps)
-              (get-holes (block-decls sketch) 
-                           (evaluate holemap model)
-                           steps)]))
 
 (define (synth! #:preconditions preconditions 
                 #:postconditions postconditions
@@ -914,7 +392,6 @@
                            (evaluate holemap model)
                            steps)]))
 
-
 (define (synth-instrs! #:semantics semantics
                        #:steps steps 
                        #:sketch sketch 
@@ -942,4 +419,3 @@
            #:inputs (build-sym-inputs (block-decls sketch)))])
          (clear-vc!)
          (values op hole-vals))))
-
